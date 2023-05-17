@@ -81,3 +81,5 @@ make后user/usys.S中将出现下图中.global trace开始的5行代码。
 <img src="https://typora-picgo-picbed.oss-cn-shenzhen.aliyuncs.com/img/202305180235547.png" alt="image-20230518023538504" style="zoom:67%;" />
 
 <img src="https://typora-picgo-picbed.oss-cn-shenzhen.aliyuncs.com/img/202305180235720.png" alt="image-20230518023552683" style="zoom:67%;" />
+
+  
