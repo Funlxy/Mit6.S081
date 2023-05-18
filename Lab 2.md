@@ -82,4 +82,189 @@ make后user/usys.S中将出现下图中.global trace开始的5行代码。
 
 <img src="https://typora-picgo-picbed.oss-cn-shenzhen.aliyuncs.com/img/202305180235720.png" alt="image-20230518023552683" style="zoom:67%;" />
 
+### Sysinfo
+
+​	`argint,argaddr,argfd`分别获取系统调用中的整数、地址、文件描述符  
+
+同上,先添加sysinfo系统调用。
+
+#### 1.实现获取空闲内存量
+
+##### 1.1 看代码学习
+
+首先看看**kernel/kalloc.c**文件。
+
+kalloc.c是XV6系统用来实现物理内存分配的,采用**分页**管理,每页4096字节。
+
+首先看下面这段代码
+
+```c
+struct run {
+  struct run *next;
+};
+```
+
+这段代码定义了一个结构体类型run，其中只包含一个成员变量next，它是一个指向结构体类型run的指针。
+
+这个结构体类型通常用于实现内存空闲链表，即用于管理已经被释放的内存页面。具体来说，每个结构体实例代表着一个已经被释放的内存页面，而next成员变量则指向下一个空闲页面的结构体实例。通过这种方式，可以将所有的空闲页面组织成一个链表，方便对它们进行管理和分配。
+
+当需要分配一个新的内存页面时，可以从这个链表中取出一个空闲页面，将它标记为已经被占用，并返回其指针给调用者。
+
+当需要释放一个已经被占用的内存页面时，可以将它转换成一个run结构体指针，并将其添加到内存空闲链表中。这样，下一次需要分配内存时，就可以从这个链表中取出一个空闲页面，并将其标记为已经被占用。
+
+------
+
+然后是
+
+```c
+struct {
+  struct spinlock lock;
+  struct run *freelist;
+} kmem;
+```
+
+这段代码定义了一个结构体类型，它包含了两个成员变量：一个spinlock类型的lock，和一个指向run类型的指针**freelist**。这个结构体类型被命名为**kmem**。
+
+具体来说，这个结构体类型通常用于内核内存管理器（kernel memory manager）。其中，spinlock类型的lock用于实现对内存空闲列表的互斥访问，以确保多个线程访问内存空闲列表时不会产生竞争条件（race condition）和数据一致性问题。而指针freelist则指向一个run类型的链表，其中每个run结构体实例代表着一个已经被释放的内存页面。
+
+------
+
+xv6采用空闲链表法来记录空闲页。
+
+其**分配空闲页的函数**如下:
+
+```c
+void *
+kalloc(void)
+{
+  struct run *r;
+
+  acquire(&kmem.lock);
+  r = kmem.freelist;
+  if(r)
+    kmem.freelist = r->next;
+  release(&kmem.lock);
+
+  if(r)
+    memset((char*)r, 5, PGSIZE); // fill with junk
+  return (void*)r;
+}
+```
+
+1. 首先获得空闲链表头,如果链表头即`r`不为空,说明存在空闲页,同时奖链表头指向下一个页面即`r->next`
+2. 接着，如果r不为空，则使用memset函数将这个页面填充为5，以便在后续使用时能够检测到**悬空引用**的情况。
+
+> 悬空引用（dangling reference）是指一个指针指向的内存已经被释放掉了，但是指针本身仍然有效，继续被使用。这种情况下，使用指针指向的内存会导致不可预测的行为，可能会造成严重的安全问题。
+>
+> 例如，当一个程序释放一个内存页面之后，这个页面中的内容就不再受到保护。如果在释放后的程序中仍然使用了这个页面，就可能会产生悬空引用。在这种情况下，程序可能会读取到无效的数据，或者修改无关的内存，导致程序崩溃或者出现其他严重问题。
+>
+> 例如这段程序代码中已经将所有字节填充为5,那么别的程序之前引用这块内存的指针继续使用就会发现内存中的数据已经被修改了,从而停止继续使用。
+
+3. 这段代码最后要返回`void*`类型的指针，是为了能够适应不同类型的数据。因为动态分配的内存空间可以用来存储各种不同类型的数据，而不同类型的数据占用的字节数是不同的。
+
+   如果这个函数只返回一个特定类型的指针，那么在使用这个函数时，就需要为每种类型的数据编写一个对应的函数，这样会增加代码的复杂性和维护成本。
+
+   而使用`void*`类型的指针，则可以将其指向任意类型的数据，从而使得函数更加灵活和通用。在函数返回一个void*类型的指针后，调用者可以将其强制转换成特定类型的指针，以便在使用这个内存空间时，可以正确地访问其中的数据。但是需要注意的是，在转换指针类型时，需要确保转换后的指针类型与实际存储在这段内存空间中的数据类型相同，否则可能会导致访问内存越界或其他类型错误。
+
+其**释放内存页的函数**如下:
+
+```c
+void
+kfree(void *pa)
+{
+  struct run *r;
+
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("kfree");
+
+  // Fill with junk to catch dangling refs.
+  memset(pa, 1, PGSIZE);
+
+  r = (struct run*)pa;
+
+  acquire(&kmem.lock);
+  r->next = kmem.freelist;
+  kmem.freelist = r;
+  release(&kmem.lock);
+}
+```
+
+这段代码是一段用于释放内核空间中动态分配的页面的代码。具体来说，它将一个指向要释放页面的指针作为参数传入函数中，然后进行如下操作：
+
+1. 首先，它检查传入的指针是否指向一个页面的开头，以及是否位于内核空间的有效范围内。如果不是，则会调用panic函数，导致系统崩溃。
+2. 接着，它使用memset函数将要释放的页面填充为1，以便在后续使用时能够检测到悬空引用的情况。
+3. 然后，它将指向要释放页面的指针转换为一个结构体指针，以便可以将该页面添加到内存空闲列表中。
+4. 最后，它获取内核内存管理器的锁，将要释放的页面添加到内存空闲列表中，并释放锁，使得其他线程可以访问该内存空闲列表。
+
+##### 1.2 实现
+
+```c
+void
+acquire_freebytes(uint64 *n)
+{
+  struct run *r;
+  *n = 0;
+  acquire(&kmem.lock);
+  r = kmem.freelist;
+  while(r){
+    r = r->next;
+    *n += PGSIZE;
+  }
+  release(&kmem.lock);
+}
+```
+
+实现则通过不断遍历freelist,当r不为NULL,则说明存在一个空闲页,则空闲字节数加上一个页面的大小,并往下继续进行遍历。
+
+#### 2.实现获取`state`字段不为`UNUSED`的进程数
+
+注意到`kernel/proc.c`中的 `struct proc proc[NPROC]`
+
+![image-20230519023657404](https://typora-picgo-picbed.oss-cn-shenzhen.aliyuncs.com/img/202305190237580.png)
+
+它存储了每个进程的进程状态,所以遍历这个数组进行判断就可以了
+
+```c
+void
+acquire_freeprocess(uint64 *n)
+{  
+    struct proc *p;
+    *n = 0;
+    for(p = proc; p < &proc[NPROC]; p++){
+      if(p->state!=UNUSED)
+        *n += 1;
+    }
+}
+```
+
+#### 3.实现系统调用
+
+```c
+uint64
+sys_sysinfo(void)
+{
+
+  struct sysinfo sys_info;
+  acquire_freebytes(&sys_info.freemem);
+  acquire_freeprocess(&sys_info.nproc);
+
+  // 虚拟地址
+  uint64 dstaddr;
+  if(argaddr(0, &dstaddr) < 0)
+    return -1;
+  struct proc *p = myproc();
   
+  if(copyout(p->pagetable, dstaddr, (char *)&sys_info, sizeof(sys_info)) < 0)
+      return -1;
+  return 0;
+  
+}
+```
+
+1. 首先获得相应的信息
+2. `argaddr`从用户态的系统调用的参数中获得对应的指针赋值给dstaddr
+3. `copyout`将sys_info复制到`dstaddr`所指的用户空间中
+
+### 测试结果
+
+![image-20230519025003704](https://typora-picgo-picbed.oss-cn-shenzhen.aliyuncs.com/img/202305190250746.png)
